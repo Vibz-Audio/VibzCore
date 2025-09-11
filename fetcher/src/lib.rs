@@ -1,5 +1,13 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
+struct MediaSource {}
+
+enum MediaSourceError {
+    UnsupportedFormae,
+}
+
+impl MediaSource {
+    fn try_new() -> Result<Self, MediaSourceError> {
+        todo!("Implement")
+    }
 }
 
 #[cfg(test)]
