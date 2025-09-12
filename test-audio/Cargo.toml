@@ -6,3 +6,5 @@ edition = "2024"
 [dependencies]
 cpal = "0.16.0"
 symphonia = "0.5.4" 
+wav-decoder = { path = "../wav-decoder" } 
+

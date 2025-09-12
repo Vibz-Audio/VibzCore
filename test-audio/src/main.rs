@@ -6,55 +6,20 @@ use cpal::SampleRate;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
 use symphonia::core::audio::SampleBuffer;
-use symphonia::core::codecs::{CODEC_TYPE_NULL, DecoderOptions};
 use symphonia::core::errors::Error;
-use symphonia::core::formats::FormatOptions;
-use symphonia::core::io::MediaSourceStream;
-use symphonia::core::meta::MetadataOptions;
-use symphonia::core::probe::Hint;
+use wav_decoder::WaveDecoder;
 
 fn main() {
-    let file_path = Path::new("samples/audio.wav");
+    let file_path = Path::new("samples/audio-wav.wav");
+    let file = std::fs::File::open(file_path).expect("Failed to open file");
 
-    let src = std::fs::File::open(file_path).expect("failed to open media");
-    let mss = MediaSourceStream::new(Box::new(src), Default::default());
-
-    let mut hint = Hint::new();
-    hint.with_extension("wav");
-
-    let meta_opts: MetadataOptions = Default::default();
-    let fmt_opts: FormatOptions = Default::default();
-
-    let probed = symphonia::default::get_probe()
-        .format(&hint, mss, &fmt_opts, &meta_opts)
-        .expect("unsupported format");
-
-    let mut format = probed.format;
-
-    let track = format
-        .tracks()
-        .iter()
-        .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
-        .expect("no supported audio tracks");
-
-    let dec_opts: DecoderOptions = Default::default();
-
-    let mut decoder = symphonia::default::get_codecs()
-        .make(&track.codec_params, &dec_opts)
-        .expect("unsupported codec");
-
-    let track_id = track.id;
+    let mut decoder = WaveDecoder::try_new(file).expect("Failed to create decoder");
 
     let mut sample_buf = None;
     let mut decorded_buffer: Vec<f32> = vec![];
 
     loop {
-        let packet = match format.next_packet() {
-            Ok(packet) => packet,
-            Err(Error::ResetRequired) => unimplemented!(),
-            Err(err) => break,
-        };
-        match decoder.decode(&packet) {
+        match decoder.decode() {
             Ok(_decoded) => {
                 if sample_buf.is_none() {
                     let spec = *_decoded.spec();
@@ -68,9 +33,8 @@ fn main() {
                     decorded_buffer.extend_from_slice(buf.samples());
                 }
             }
-            Err(err) => {
-                panic!("{}", err);
-            }
+            Err(Error::ResetRequired) => unimplemented!(),
+            Err(err) => break,
         }
     }
 

@@ -1,6 +1,15 @@
 { pkgs ? import <nixpkgs> { } }:
 pkgs.mkShell {
-  nativeBuildInputs = with pkgs; [ rustc cargo gcc rustfmt clippy ];
+  nativeBuildInputs = with pkgs; [
+    rustc
+    cargo
+    gcc
+    rustfmt
+    clippy
+    alsa-lib
+    pkg-config
+    lldb
+  ];
 
   # Certain Rust tools won't work without this
   # This can also be fixed by using oxalica/rust-overlay and specifying the rust-src extension
