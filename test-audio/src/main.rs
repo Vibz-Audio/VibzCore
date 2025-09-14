@@ -10,7 +10,7 @@ use symphonia::core::errors::Error;
 use wav_decoder::WaveDecoder;
 
 fn main() {
-    let file_path = Path::new("samples/audio-wav.wav");
+    let file_path = Path::new("samples/crave.wav");
     let file = std::fs::File::open(file_path).expect("Failed to open file");
 
     let mut decoder = WaveDecoder::try_new(file).expect("Failed to create decoder");
@@ -48,10 +48,10 @@ fn main() {
         .unwrap()
         .next()
         .unwrap()
-        .with_sample_rate(SampleRate(48000))
+        .with_sample_rate(SampleRate(44100))
         .config();
 
-    let playback_pos = Arc::new(Mutex::new(10000));
+    let playback_pos = Arc::new(Mutex::new(0));
     let audio_buf = Arc::new(decorded_buffer);
 
     let audio_buf_clone = Arc::clone(&audio_buf);
@@ -65,7 +65,12 @@ fn main() {
                     let mut pos = playback_pos_clone.lock().unwrap();
                     if *pos < audio_buf_clone.len() {
                         *sample = audio_buf_clone[*pos];
-                        *pos += 1;
+                        *pos += 2;
+
+                        for _ in 0..(*sample * 1000.0) as usize {
+                            print!("*");
+                        }
+                        println!();
                     } else {
                         *sample = 0.0; // empty audio
                     }
@@ -80,5 +85,5 @@ fn main() {
 
     stream.play().unwrap();
 
-    std::thread::sleep(std::time::Duration::from_secs(12));
+    std::thread::sleep(std::time::Duration::from_secs(120));
 }
