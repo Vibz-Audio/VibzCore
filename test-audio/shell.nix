@@ -9,6 +9,7 @@ pkgs.mkShell {
     alsa-lib
     pkg-config
     lldb
+    audacity
   ];
 
   # Certain Rust tools won't work without this
