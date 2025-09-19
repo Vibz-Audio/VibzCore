@@ -1,9 +1,11 @@
 #![allow(unused_variables)]
 use cpal::SampleRate;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use std::io::Write;
 use std::path::Path;
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, mpsc};
 use std::thread;
-use std::time::Instant;
 
 use ringbuf::SharedRb;
 use ringbuf::storage::Heap;
@@ -17,13 +19,28 @@ fn main() {
     let file = std::fs::File::open(file_path).expect("Failed to open file");
 
     let mut decoder = WaveDecoder::try_new(file).expect("Failed to create decoder");
-
     let mut sample_buf = None;
 
-    let capacity = (44100 * 2) * 2;
+    let lookahead = 10;
+    let capacity = (44100 * 2) * lookahead;
+    let tolerance = capacity / 2;
     let rb = SharedRb::<Heap<f32>>::new(capacity); // 1 second buffer for
     // stereo f32 audio
     let (mut producer, mut consumer) = rb.split();
+
+    enum AudioMessage {
+        NeedData,
+    }
+    let (tx, rx) = mpsc::channel::<AudioMessage>();
+
+    enum ProcessingControlMessage {
+        RequestData,
+        DecodingDone,
+        BufferFull,
+        BufferRecharge,
+        BufferUnderrun,
+    }
+    let (tx_control, rx_control) = mpsc::channel::<ProcessingControlMessage>();
 
     let host = cpal::default_host();
     let device = host
@@ -38,80 +55,138 @@ fn main() {
         .with_sample_rate(SampleRate(44100))
         .config();
 
-    thread::spawn(move || {
-        println!("Starting decoder thread");
-        loop {
-            loop {
-                println!(
-                    "Producer len: {} / capacity: {}",
-                    producer.occupied_len(),
-                    capacity
-                );
-                if producer.occupied_len() >= (capacity / 2) {
-                    println!("Producer full, sleeping...");
-                    break;
+    let tx_clone = tx.clone();
+
+    let audio_done = Arc::new(AtomicBool::new(false));
+    let audio_d_stream = audio_done.clone();
+    let audio_d_worker = audio_done.clone();
+
+    // Prevent buffer underrun at start
+    tx.send(AudioMessage::NeedData).unwrap();
+
+    let tx_control_stream = tx_control.clone();
+    let tx_control_worker = tx_control.clone();
+    let stream = device
+        .build_output_stream(
+            &config,
+            move |data: &mut [f32], cb: &cpal::OutputCallbackInfo| {
+                if consumer.occupied_len() < tolerance {
+                    tx_control_stream
+                        .send(ProcessingControlMessage::RequestData)
+                        .ok();
+                    if tx.send(AudioMessage::NeedData).is_err() {
+                        // worker thread has stopped
+                        // We can assume audio is done
+                        audio_d_stream.store(true, std::sync::atomic::Ordering::Relaxed);
+                        return;
+                    }
                 }
-
-                // println!("Decoding audio...");
-                match decoder.decode() {
-                    Ok(_decoded) => {
-                        if sample_buf.is_none() {
-                            let spec = *_decoded.spec();
-                            let duration = _decoded.capacity() as u64;
-
-                            sample_buf = Some(SampleBuffer::<f32>::new(duration, spec));
+                for (idx, sample) in data.iter_mut().enumerate() {
+                    // Has audio data
+                    if consumer.occupied_len() > 0 {
+                        let _ = consumer.try_pop().unwrap_or(0.0);
+                        let val = consumer.try_pop().unwrap_or(0.0);
+                        *sample = val;
+                    } else {
+                        if !audio_d_stream.load(std::sync::atomic::Ordering::Relaxed) {
+                            tx_control_stream
+                                .send(ProcessingControlMessage::BufferUnderrun)
+                                .ok();
                         }
-                        if let Some(buf) = &mut sample_buf {
-                            buf.copy_interleaved_ref(_decoded);
-                            producer.push_slice(buf.samples());
+                        *sample = 0.0; // empty audio
+                    }
+                }
+            },
+            move |err| {
+                print!("An error occured");
+            },
+            None,
+        )
+        .unwrap();
+
+    stream.play().unwrap();
+
+    thread::spawn(move || {
+        'outer: loop {
+            match rx.try_recv() {
+                Ok(msg) => match msg {
+                    AudioMessage::NeedData => loop {
+                        if producer.occupied_len() > capacity - 1024 {
+                            tx_control_worker
+                                .send(ProcessingControlMessage::BufferFull)
+                                .ok();
+                            break;
                         }
-                    }
-                    Err(Error::ResetRequired) => {
-                        println!("Decoder reset required");
-                        break;
-                    }
-                    Err(err) => {
-                        eprintln!("Error decoding audio: {:?}", err);
-                        break;
-                    }
+                        match decoder.decode() {
+                            Ok(_decoded) => {
+                                if sample_buf.is_none() {
+                                    let spec = *_decoded.spec();
+                                    let duration = _decoded.capacity() as u64;
+
+                                    sample_buf = Some(SampleBuffer::<f32>::new(duration, spec));
+                                }
+                                if let Some(buf) = &mut sample_buf {
+                                    tx_control_worker
+                                        .send(ProcessingControlMessage::BufferRecharge)
+                                        .ok();
+                                    buf.copy_interleaved_ref(_decoded);
+                                    producer.push_slice(buf.samples());
+                                }
+                            }
+                            Err(Error::ResetRequired) => break,
+                            Err(err) => {
+                                tx_control_worker
+                                    .send(ProcessingControlMessage::DecodingDone)
+                                    .ok();
+                                if producer.is_empty() {
+                                    println!("Audio done");
+                                    stream.pause().expect("Failed to pause stream");
+                                    audio_d_worker
+                                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                                    break 'outer;
+                                }
+                            }
+                        }
+                    },
+                },
+                Err(_) => {
+                    // No message received, can perform other tasks or just sleep
+                    std::thread::sleep(std::time::Duration::from_millis(200));
                 }
             }
-            std::thread::sleep(std::time::Duration::from_millis(100));
         }
     });
 
-    thread::spawn(move || {
-        println!("Starting playback thread");
-        let stream = device
-            .build_output_stream(
-                &config,
-                move |data: &mut [f32], cb: &cpal::OutputCallbackInfo| {
-                    for (idx, sample) in data.iter_mut().enumerate() {
-                        // println!("Streaming");
-                        if consumer.occupied_len() > 0 {
-                            let _ = consumer.try_pop().unwrap_or(0.0);
-                            let val = consumer.try_pop().unwrap_or(0.0);
-                            // println!("Sample[{}] = {}", idx, val);
-                            *sample = val;
-                        } else {
-                            println!("Buffer underrun!");
-                            *sample = 0.0; // empty audio
-                        }
-                    }
-                },
-                move |err| {
-                    print!("An error occured");
-                },
-                None,
-            )
-            .unwrap();
+    // UI display
+    loop {
+        if let Ok(msg) = rx_control.recv() {
+            // Clear the terminal screen
+            print!("\x1B[2J\x1B[1;1H");
+            std::io::stdout().flush().unwrap();
 
-        stream.play().unwrap();
-
-        loop {
-            std::thread::sleep(std::time::Duration::from_secs(1));
+            match msg {
+                ProcessingControlMessage::DecodingDone => {
+                    println!("✅ Decoding done");
+                }
+                ProcessingControlMessage::BufferFull => {
+                    println!("🔋 Buffer full");
+                }
+                ProcessingControlMessage::RequestData => {
+                    println!("🪫 Requesting more data");
+                }
+                ProcessingControlMessage::BufferUnderrun => {
+                    println!("⚠️ Buffer underrun, audio may stutter");
+                }
+                ProcessingControlMessage::BufferRecharge => {
+                    println!("🔄 Recharging buffer");
+                }
+            }
+        } else {
+            break;
         }
-    });
+    }
 
-    std::thread::sleep(std::time::Duration::from_secs(120));
+    while !audio_done.load(std::sync::atomic::Ordering::Relaxed) {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
 }
