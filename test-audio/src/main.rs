@@ -1,8 +1,8 @@
 #![allow(unused_variables)]
+mod AudioBufferConfig;
+
 use cpal::SampleRate;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use ringbuf::SharedRb;
-use ringbuf::storage::Heap;
 use ringbuf::traits::{Consumer, Observer, Producer, Split};
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
@@ -24,19 +24,53 @@ enum PlaybackMessage {
     RequestData,
 }
 
-// Buffer constants
-const B_SAMPLE_RATE: u32 = 44100;
-const B_LOOKAHEAD: usize = 10; // Lookahead in seconds
-const B_CAPACITY: usize = ((B_SAMPLE_RATE) as usize * 2) * B_LOOKAHEAD;
-const B_THRESHOLD: usize = 1024; // Threshold to consider buffer "full"
-const B_TOLERANCE: usize = B_CAPACITY / 2;
+struct AudioClip {
+    l_offset: u64,
+    r_offset: u64,
+    decoder: WaveDecoder,
+}
+
+impl AudioClip {
+    fn new(file_path: &Path) -> Result<Self, Error> {
+        let file = std::fs::File::open(file_path)?;
+        let decoder = WaveDecoder::try_new(file)?;
+        Ok(AudioClip {
+            l_offset: 0,
+            r_offset: 0,
+            decoder,
+        })
+    }
+
+    fn decode(&mut self) -> Result<symphonia::core::audio::AudioBufferRef, Error> {
+        self.decoder.decode()
+    }
+}
 
 fn main() {
-    // Initialize decoder
-    let file_path = Path::new("samples/crave.wav");
-    let file = std::fs::File::open(file_path).expect("Failed to open file");
-    let mut decoder = WaveDecoder::try_new(file).expect("Failed to create decoder");
-    let mut sample_buf = None;
+    let b_config = AudioBufferConfig::AudioBufferConfig::default();
+
+    let clip_paths = vec![
+        "samples/trackouts/dnb/01_Drumloop1.wav",
+        "samples/trackouts/dnb/02_Drumloop2.wav",
+        "samples/trackouts/dnb/03_Kick1.wav",
+        "samples/trackouts/dnb/04_Kick2.wav",
+        "samples/trackouts/dnb/05_Snare.wav",
+        "samples/trackouts/dnb/06_Ride1.wav",
+        "samples/trackouts/dnb/07_Ride2.wav",
+        "samples/trackouts/dnb/08_HiHat.wav",
+        "samples/trackouts/dnb/09_SFX1.wav",
+        "samples/trackouts/dnb/10_SFX2.wav",
+        "samples/trackouts/dnb/11_Bass1.wav",
+        "samples/trackouts/dnb/12_Bass2.wav",
+        "samples/trackouts/dnb/13_BassSub.wav",
+        "samples/trackouts/dnb/14_Strings1.wav",
+        "samples/trackouts/dnb/15_Strings2.wav",
+    ];
+
+    let mut all_clips: Vec<AudioClip> = clip_paths
+        .iter()
+        .map(|path| AudioClip::new(Path::new(path)).expect("Failed to create audio clip"))
+        .collect();
 
     let host = cpal::default_host();
     let device = host
@@ -48,11 +82,10 @@ fn main() {
         .unwrap()
         .next()
         .unwrap()
-        .with_sample_rate(SampleRate(B_SAMPLE_RATE))
+        .with_sample_rate(SampleRate(b_config.sample_rate))
         .config();
 
-    // Ring buffer for audio samples
-    let rb = SharedRb::<Heap<f32>>::new(B_CAPACITY);
+    let rb = b_config.rb;
     let (mut producer, mut consumer) = rb.split();
 
     // MPC channels for communication
@@ -73,7 +106,7 @@ fn main() {
         .build_output_stream(
             &config,
             move |data: &mut [f32], cb: &cpal::OutputCallbackInfo| {
-                if consumer.occupied_len() < B_TOLERANCE {
+                if consumer.occupied_len() < b_config.tolerance {
                     tx_control_stream
                         .send(ProcessingControlMessage::RequestData)
                         .ok();
@@ -107,43 +140,75 @@ fn main() {
     stream.play().unwrap();
 
     /* Worker thread for decoding and buffering */
+    let mut sample_buf = all_clips
+        .iter()
+        .map(|_| None)
+        .collect::<Vec<Option<SampleBuffer<f32>>>>();
     thread::spawn(move || {
         'outer: loop {
             if let Ok(msg) = rx_playback.try_recv() {
                 loop {
-                    if producer.occupied_len() > B_CAPACITY - B_THRESHOLD {
+                    if producer.occupied_len() > b_config.threshold {
                         tx_control_worker
                             .send(ProcessingControlMessage::BufferFull)
                             .ok();
                         break;
                     }
-                    match decoder.decode() {
-                        Ok(_decoded) => {
-                            if sample_buf.is_none() {
-                                let spec = *_decoded.spec();
-                                let duration = _decoded.capacity() as u64;
+                    let mut mixed_samples: Vec<f32> = Vec::new();
+                    let mut any_decoded = false;
 
-                                sample_buf = Some(SampleBuffer::<f32>::new(duration, spec));
+                    // Decode from all clips and mix them together
+                    for (idx, clip) in all_clips.iter_mut().enumerate() {
+                        match clip.decode() {
+                            Ok(_decoded) => {
+                                any_decoded = true;
+                                if sample_buf[idx].is_none() {
+                                    let spec = *_decoded.spec();
+                                    let duration = _decoded.capacity() as u64;
+                                    sample_buf[idx] =
+                                        Some(SampleBuffer::<f32>::new(duration, spec));
+                                }
+                                if let Some(buf) = &mut sample_buf[idx] {
+                                    buf.copy_interleaved_ref(_decoded);
+                                    let samples = buf.samples();
+
+                                    // Mix samples with existing mixed_samples or initialize
+                                    if mixed_samples.is_empty() {
+                                        mixed_samples = samples.to_vec();
+                                    } else {
+                                        // Add samples together (mixing)
+                                        for (i, &sample) in samples.iter().enumerate() {
+                                            if i < mixed_samples.len() {
+                                                mixed_samples[i] += sample / 2.0;
+                                            } else {
+                                                mixed_samples.push(sample);
+                                            }
+                                        }
+                                    }
+                                }
                             }
-                            if let Some(buf) = &mut sample_buf {
-                                tx_control_worker
-                                    .send(ProcessingControlMessage::BufferRecharge)
-                                    .ok();
-                                buf.copy_interleaved_ref(_decoded);
-                                producer.push_slice(buf.samples());
+                            Err(Error::ResetRequired) => break,
+                            Err(_) => {
+                                // This clip is done, continue with other clips
                             }
                         }
-                        Err(Error::ResetRequired) => break,
-                        Err(err) => {
-                            tx_control_worker
-                                .send(ProcessingControlMessage::DecodingDone)
-                                .ok();
-                            if producer.is_empty() {
-                                println!("Audio done");
-                                stream.pause().expect("Failed to pause stream");
-                                audio_d_on_worker.store(true, std::sync::atomic::Ordering::Relaxed);
-                                break 'outer;
-                            }
+                    }
+
+                    // Push mixed audio to ring buffer if we have any samples
+                    if any_decoded && !mixed_samples.is_empty() {
+                        tx_control_worker
+                            .send(ProcessingControlMessage::BufferRecharge)
+                            .ok();
+                        producer.push_slice(&mixed_samples);
+                    } else {
+                        // All clips are done
+                        tx_control_worker
+                            .send(ProcessingControlMessage::DecodingDone)
+                            .ok();
+                        if producer.is_empty() {
+                            println!("Audio done");
+                            audio_d_on_worker.store(true, std::sync::atomic::Ordering::Relaxed);
+                            break 'outer;
                         }
                     }
                 }
