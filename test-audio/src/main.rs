@@ -8,6 +8,7 @@ use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, mpsc};
 use std::thread;
+use std::time::Duration;
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::errors::Error;
 use wav_decoder::WaveDecoder;
@@ -25,18 +26,25 @@ enum PlaybackMessage {
 }
 
 struct AudioClip {
-    l_offset: u64,
-    r_offset: u64,
+    l_offset: Duration,
+    r_offset: Duration,
     decoder: WaveDecoder,
 }
 
 impl AudioClip {
-    fn new(file_path: &Path) -> Result<Self, Error> {
+    fn new(
+        file_path: &Path,
+        l_offset: Option<Duration>,
+        r_offset: Option<Duration>,
+    ) -> Result<Self, Error> {
         let file = std::fs::File::open(file_path)?;
-        let decoder = WaveDecoder::try_new(file)?;
+        let mut decoder = WaveDecoder::try_new(file)?;
+
+        decoder.set_st_time(l_offset.unwrap_or(Duration::from_secs(0)))?;
+
         Ok(AudioClip {
-            l_offset: 0,
-            r_offset: 0,
+            l_offset: l_offset.unwrap_or(Duration::from_secs(0)),
+            r_offset: r_offset.unwrap_or(Duration::from_secs(0)),
             decoder,
         })
     }
@@ -50,26 +58,30 @@ fn main() {
     let b_config = AudioBufferConfig::AudioBufferConfig::default();
 
     let clip_paths = vec![
-        "samples/trackouts/dnb/01_Drumloop1.wav",
-        "samples/trackouts/dnb/02_Drumloop2.wav",
-        "samples/trackouts/dnb/03_Kick1.wav",
-        "samples/trackouts/dnb/04_Kick2.wav",
-        "samples/trackouts/dnb/05_Snare.wav",
-        "samples/trackouts/dnb/06_Ride1.wav",
-        "samples/trackouts/dnb/07_Ride2.wav",
-        "samples/trackouts/dnb/08_HiHat.wav",
-        "samples/trackouts/dnb/09_SFX1.wav",
-        "samples/trackouts/dnb/10_SFX2.wav",
-        "samples/trackouts/dnb/11_Bass1.wav",
-        "samples/trackouts/dnb/12_Bass2.wav",
-        "samples/trackouts/dnb/13_BassSub.wav",
-        "samples/trackouts/dnb/14_Strings1.wav",
-        "samples/trackouts/dnb/15_Strings2.wav",
+        // "samples/trackouts/dnb/01_Drumloop1.wav",
+        // "samples/trackouts/dnb/02_Drumloop2.wav",
+        // "samples/trackouts/dnb/03_Kick1.wav",
+        // "samples/trackouts/dnb/04_Kick2.wav",
+        // "samples/trackouts/dnb/05_Snare.wav",
+        // "samples/trackouts/dnb/06_Ride1.wav",
+        // "samples/trackouts/dnb/07_Ride2.wav",
+        // "samples/trackouts/dnb/08_HiHat.wav",
+        // "samples/trackouts/dnb/09_SFX1.wav",
+        // "samples/trackouts/dnb/10_SFX2.wav",
+        // "samples/trackouts/dnb/11_Bass1.wav",
+        // "samples/trackouts/dnb/12_Bass2.wav",
+        // "samples/trackouts/dnb/13_BassSub.wav",
+        // "samples/trackouts/dnb/14_Strings1.wav",
+        // "samples/trackouts/dnb/15_Strings2.wav",
+        "samples/crave.wav",
     ];
 
     let mut all_clips: Vec<AudioClip> = clip_paths
         .iter()
-        .map(|path| AudioClip::new(Path::new(path)).expect("Failed to create audio clip"))
+        .map(|path| {
+            AudioClip::new(Path::new(path), Some(Duration::from_millis(30_000)), None)
+                .expect("Failed to create audio clip")
+        })
         .collect();
 
     let host = cpal::default_host();
@@ -100,6 +112,7 @@ fn main() {
     let audio_done = Arc::new(AtomicBool::new(false));
     let audio_d_on_stream = audio_done.clone();
     let audio_d_on_worker = audio_done.clone();
+    let first_run = Arc::new(AtomicBool::new(false));
 
     /* Audio output stream */
     let stream = device
@@ -145,6 +158,7 @@ fn main() {
         .map(|_| None)
         .collect::<Vec<Option<SampleBuffer<f32>>>>();
     thread::spawn(move || {
+        first_run.store(true, std::sync::atomic::Ordering::Relaxed);
         'outer: loop {
             if let Ok(msg) = rx_playback.try_recv() {
                 loop {
@@ -172,22 +186,26 @@ fn main() {
                                     buf.copy_interleaved_ref(_decoded);
                                     let samples = buf.samples();
 
-                                    // Mix samples with existing mixed_samples or initialize
+                                    // We never wrote into the buffer
                                     if mixed_samples.is_empty() {
                                         mixed_samples = samples.to_vec();
                                     } else {
-                                        // Add samples together (mixing)
+                                        // Mixing
                                         for (i, &sample) in samples.iter().enumerate() {
                                             if i < mixed_samples.len() {
                                                 mixed_samples[i] += sample / 2.0;
                                             } else {
+                                                // In case clips are of different lengths
                                                 mixed_samples.push(sample);
                                             }
                                         }
                                     }
                                 }
                             }
-                            Err(Error::ResetRequired) => break,
+                            Err(Error::ResetRequired) => {
+                                println!("Decoder reset required for a clip");
+                                break;
+                            }
                             Err(_) => {
                                 // This clip is done, continue with other clips
                             }
@@ -206,7 +224,6 @@ fn main() {
                             .send(ProcessingControlMessage::DecodingDone)
                             .ok();
                         if producer.is_empty() {
-                            println!("Audio done");
                             audio_d_on_worker.store(true, std::sync::atomic::Ordering::Relaxed);
                             break 'outer;
                         }
