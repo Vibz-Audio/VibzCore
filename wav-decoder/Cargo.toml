@@ -1,7 +1,0 @@
-[package]
-name = "wav-decoder"
-version = "0.1.0"
-edition = "2024"
-
-[dependencies]
-symphonia = "0.5.4"

@@ -32,8 +32,6 @@ impl WaveReader {
     }
 }
 
-// TODO: Implement A WaveDecoderOptions struct to configure the decoder
-// in order to make the WaveDecoder more flexible and reuse logic
 impl WaveDecoder {
     pub fn try_new(file: std::fs::File) -> Result<WaveDecoder, Error> {
         let mss = MediaSourceStream::new(Box::new(file), Default::default());

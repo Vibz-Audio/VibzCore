@@ -1,5 +1,7 @@
 #![allow(unused_variables)]
-mod AudioBufferConfig;
+mod buffer_config;
+mod clip;
+mod wav_decoder;
 
 use cpal::SampleRate;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -11,7 +13,6 @@ use std::thread;
 use std::time::Duration;
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::errors::Error;
-use wav_decoder::WaveDecoder;
 
 enum ProcessingControlMessage {
     RequestData,
@@ -25,61 +26,32 @@ enum PlaybackMessage {
     RequestData,
 }
 
-struct AudioClip {
-    l_offset: Duration,
-    r_offset: Duration,
-    decoder: WaveDecoder,
-}
-
-impl AudioClip {
-    fn new(
-        file_path: &Path,
-        l_offset: Option<Duration>,
-        r_offset: Option<Duration>,
-    ) -> Result<Self, Error> {
-        let file = std::fs::File::open(file_path)?;
-        let mut decoder = WaveDecoder::try_new(file)?;
-
-        decoder.set_st_time(l_offset.unwrap_or(Duration::from_secs(0)))?;
-
-        Ok(AudioClip {
-            l_offset: l_offset.unwrap_or(Duration::from_secs(0)),
-            r_offset: r_offset.unwrap_or(Duration::from_secs(0)),
-            decoder,
-        })
-    }
-
-    fn decode(&mut self) -> Result<symphonia::core::audio::AudioBufferRef, Error> {
-        self.decoder.decode()
-    }
-}
-
 fn main() {
-    let b_config = AudioBufferConfig::AudioBufferConfig::default();
+    let b_config = buffer_config::AudioBufferConfig::default();
 
     let clip_paths = vec![
-        // "samples/trackouts/dnb/01_Drumloop1.wav",
-        // "samples/trackouts/dnb/02_Drumloop2.wav",
-        // "samples/trackouts/dnb/03_Kick1.wav",
-        // "samples/trackouts/dnb/04_Kick2.wav",
-        // "samples/trackouts/dnb/05_Snare.wav",
-        // "samples/trackouts/dnb/06_Ride1.wav",
-        // "samples/trackouts/dnb/07_Ride2.wav",
-        // "samples/trackouts/dnb/08_HiHat.wav",
-        // "samples/trackouts/dnb/09_SFX1.wav",
-        // "samples/trackouts/dnb/10_SFX2.wav",
-        // "samples/trackouts/dnb/11_Bass1.wav",
-        // "samples/trackouts/dnb/12_Bass2.wav",
-        // "samples/trackouts/dnb/13_BassSub.wav",
-        // "samples/trackouts/dnb/14_Strings1.wav",
-        // "samples/trackouts/dnb/15_Strings2.wav",
-        "samples/crave.wav",
+        "samples/trackouts/dnb/01_Drumloop1.wav",
+        "samples/trackouts/dnb/02_Drumloop2.wav",
+        "samples/trackouts/dnb/03_Kick1.wav",
+        "samples/trackouts/dnb/04_Kick2.wav",
+        "samples/trackouts/dnb/05_Snare.wav",
+        "samples/trackouts/dnb/06_Ride1.wav",
+        "samples/trackouts/dnb/07_Ride2.wav",
+        "samples/trackouts/dnb/08_HiHat.wav",
+        "samples/trackouts/dnb/09_SFX1.wav",
+        "samples/trackouts/dnb/10_SFX2.wav",
+        "samples/trackouts/dnb/11_Bass1.wav",
+        "samples/trackouts/dnb/12_Bass2.wav",
+        "samples/trackouts/dnb/13_BassSub.wav",
+        "samples/trackouts/dnb/14_Strings1.wav",
+        "samples/trackouts/dnb/15_Strings2.wav",
+        // "samples/crave.wav",
     ];
 
-    let mut all_clips: Vec<AudioClip> = clip_paths
+    let mut all_clips: Vec<clip::AudioClip> = clip_paths
         .iter()
         .map(|path| {
-            AudioClip::new(Path::new(path), Some(Duration::from_millis(30_000)), None)
+            clip::AudioClip::new(Path::new(path), Some(Duration::from_millis(10_000)), None)
                 .expect("Failed to create audio clip")
         })
         .collect();
