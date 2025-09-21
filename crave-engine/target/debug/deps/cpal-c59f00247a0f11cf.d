@@ -1,0 +1,13 @@
+/home/max/Documents/dev/rust/vibz/VibzCore/test-audio/target/debug/deps/libcpal-c59f00247a0f11cf.rmeta: /home/max/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cpal-0.16.0/src/lib.rs /home/max/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cpal-0.16.0/src/error.rs /home/max/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cpal-0.16.0/src/host/mod.rs /home/max/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cpal-0.16.0/src/host/alsa/mod.rs /home/max/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cpal-0.16.0/src/host/alsa/enumerate.rs /home/max/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cpal-0.16.0/src/host/null/mod.rs /home/max/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cpal-0.16.0/src/platform/mod.rs /home/max/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cpal-0.16.0/src/samples_formats.rs /home/max/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cpal-0.16.0/src/traits.rs
+
+/home/max/Documents/dev/rust/vibz/VibzCore/test-audio/target/debug/deps/cpal-c59f00247a0f11cf.d: /home/max/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cpal-0.16.0/src/lib.rs /home/max/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cpal-0.16.0/src/error.rs /home/max/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cpal-0.16.0/src/host/mod.rs /home/max/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cpal-0.16.0/src/host/alsa/mod.rs /home/max/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cpal-0.16.0/src/host/alsa/enumerate.rs /home/max/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cpal-0.16.0/src/host/null/mod.rs /home/max/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cpal-0.16.0/src/platform/mod.rs /home/max/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cpal-0.16.0/src/samples_formats.rs /home/max/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cpal-0.16.0/src/traits.rs
+
+/home/max/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cpal-0.16.0/src/lib.rs:
+/home/max/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cpal-0.16.0/src/error.rs:
+/home/max/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cpal-0.16.0/src/host/mod.rs:
+/home/max/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cpal-0.16.0/src/host/alsa/mod.rs:
+/home/max/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cpal-0.16.0/src/host/alsa/enumerate.rs:
+/home/max/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cpal-0.16.0/src/host/null/mod.rs:
+/home/max/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cpal-0.16.0/src/platform/mod.rs:
+/home/max/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cpal-0.16.0/src/samples_formats.rs:
+/home/max/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cpal-0.16.0/src/traits.rs:
