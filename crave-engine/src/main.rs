@@ -6,6 +6,7 @@ mod wav_decoder;
 use cpal::SampleRate;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use ringbuf::traits::{Consumer, Observer, Producer, Split};
+use std::io::BufRead;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, mpsc};
@@ -30,28 +31,28 @@ fn main() {
     let b_config = buffer_config::AudioBufferConfig::default();
 
     let clip_paths = vec![
-        "samples/trackouts/dnb/01_Drumloop1.wav",
-        "samples/trackouts/dnb/02_Drumloop2.wav",
-        "samples/trackouts/dnb/03_Kick1.wav",
-        "samples/trackouts/dnb/04_Kick2.wav",
-        "samples/trackouts/dnb/05_Snare.wav",
-        "samples/trackouts/dnb/06_Ride1.wav",
-        "samples/trackouts/dnb/07_Ride2.wav",
-        "samples/trackouts/dnb/08_HiHat.wav",
-        "samples/trackouts/dnb/09_SFX1.wav",
-        "samples/trackouts/dnb/10_SFX2.wav",
-        "samples/trackouts/dnb/11_Bass1.wav",
-        "samples/trackouts/dnb/12_Bass2.wav",
-        "samples/trackouts/dnb/13_BassSub.wav",
-        "samples/trackouts/dnb/14_Strings1.wav",
-        "samples/trackouts/dnb/15_Strings2.wav",
-        // "samples/crave.wav",
+        // "samples/trackouts/dnb/01_Drumloop1.wav",
+        // "samples/trackouts/dnb/02_Drumloop2.wav",
+        // "samples/trackouts/dnb/03_Kick1.wav",
+        // "samples/trackouts/dnb/04_Kick2.wav",
+        // "samples/trackouts/dnb/05_Snare.wav",
+        // "samples/trackouts/dnb/06_Ride1.wav",
+        // "samples/trackouts/dnb/07_Ride2.wav",
+        // "samples/trackouts/dnb/08_HiHat.wav",
+        // "samples/trackouts/dnb/09_SFX1.wav",
+        // "samples/trackouts/dnb/10_SFX2.wav",
+        // "samples/trackouts/dnb/11_Bass1.wav",
+        // "samples/trackouts/dnb/12_Bass2.wav",
+        // "samples/trackouts/dnb/13_BassSub.wav",
+        // "samples/trackouts/dnb/14_Strings1.wav",
+        // "samples/trackouts/dnb/15_Strings2.wav",
+        "samples/crave.wav",
     ];
 
     let mut all_clips: Vec<clip::AudioClip> = clip_paths
         .iter()
         .map(|path| {
-            clip::AudioClip::new(Path::new(path), Some(Duration::from_millis(10_000)), None)
+            clip::AudioClip::new(Path::new(path), Some(Duration::from_millis(00_000)), None)
                 .expect("Failed to create audio clip")
         })
         .collect();
@@ -80,8 +81,11 @@ fn main() {
     // Prevent buffer underrun at start
     tx_playback.send(PlaybackMessage::RequestData).unwrap();
 
-    // Atomic flag to indicate when audio is done
     let audio_done = Arc::new(AtomicBool::new(false));
+    let audio_paused = Arc::new(AtomicBool::new(true));
+
+    let audio_p_on_worker = audio_paused.clone();
+    let audio_p_on_stream = audio_paused.clone();
     let audio_d_on_stream = audio_done.clone();
     let audio_d_on_worker = audio_done.clone();
     let first_run = Arc::new(AtomicBool::new(false));
@@ -91,6 +95,13 @@ fn main() {
         .build_output_stream(
             &config,
             move |data: &mut [f32], cb: &cpal::OutputCallbackInfo| {
+                // Pause handling
+                if audio_p_on_stream.load(std::sync::atomic::Ordering::Relaxed) {
+                    for sample in data.iter_mut() {
+                        *sample = 0.0;
+                    }
+                    return;
+                }
                 if consumer.occupied_len() < b_config.tolerance {
                     tx_control_stream
                         .send(ProcessingControlMessage::RequestData)
@@ -100,6 +111,7 @@ fn main() {
                         return;
                     }
                 }
+
                 for (idx, sample) in data.iter_mut().enumerate() {
                     // Has audio data
                     if consumer.occupied_len() > 0 {
@@ -122,7 +134,9 @@ fn main() {
             None,
         )
         .unwrap();
+
     stream.play().unwrap();
+    audio_paused.store(false, std::sync::atomic::Ordering::Relaxed);
 
     /* Worker thread for decoding and buffering */
     let mut sample_buf = all_clips
@@ -134,6 +148,9 @@ fn main() {
         'outer: loop {
             if let Ok(msg) = rx_playback.try_recv() {
                 loop {
+                    if audio_p_on_worker.load(std::sync::atomic::Ordering::Relaxed) {
+                        break;
+                    }
                     if producer.occupied_len() > b_config.threshold {
                         tx_control_worker
                             .send(ProcessingControlMessage::BufferFull)
@@ -214,6 +231,7 @@ fn main() {
                 // Clear terminal
                 // print!("\x1B[2J\x1B[1;1H");
                 // std::io::stdout().flush().unwrap();
+
                 match msg {
                     ProcessingControlMessage::DecodingDone => {
                         println!("✅ Decoding done");
@@ -233,6 +251,25 @@ fn main() {
                 }
             }
             Err(_) => break,
+        }
+
+        // Simple CLI for pausing/resuming
+        let stdin = std::io::stdin();
+        let lines = stdin.lock().lines();
+
+        for line in lines {
+            let input = line.unwrap();
+
+            if input.trim() == "p" {
+                let paused = audio_paused.load(std::sync::atomic::Ordering::Relaxed);
+                if paused {
+                    println!("Resuming...");
+                    audio_paused.store(false, std::sync::atomic::Ordering::Relaxed);
+                } else {
+                    println!("Pausing...");
+                    audio_paused.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
         }
     }
 
