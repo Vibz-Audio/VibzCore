@@ -1,6 +1,7 @@
 #![allow(unused_variables)]
 mod buffer_config;
 mod clip;
+mod playback;
 mod wav_decoder;
 
 use cpal::SampleRate;
@@ -14,6 +15,8 @@ use std::thread;
 use std::time::Duration;
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::errors::Error;
+
+use crate::playback::PlaybackConfig;
 
 enum ProcessingControlMessage {
     RequestData,
@@ -49,6 +52,9 @@ fn main() {
         "samples/crave.wav",
     ];
 
+    let PlaybackConfig { device, config, .. } = PlaybackConfig::new();
+
+    //#region SEQUENCER
     let mut all_clips: Vec<clip::AudioClip> = clip_paths
         .iter()
         .map(|path| {
@@ -56,22 +62,11 @@ fn main() {
                 .expect("Failed to create audio clip")
         })
         .collect();
-
-    let host = cpal::default_host();
-    let device = host
-        .default_output_device()
-        .expect("no output device available");
-
-    let config = device
-        .supported_output_configs()
-        .unwrap()
-        .next()
-        .unwrap()
-        .with_sample_rate(SampleRate(b_config.sample_rate))
-        .config();
-
+    // Ring Buffer for audio samples
     let rb = b_config.rb;
     let (mut producer, mut consumer) = rb.split();
+
+    //#endregion
 
     // MPC channels for communication
     let (tx_playback, rx_playback) = mpsc::channel::<PlaybackMessage>();
