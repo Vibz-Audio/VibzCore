@@ -4,6 +4,7 @@ mod clip;
 mod messages;
 mod playback;
 mod producer;
+mod visualizer;
 mod wav_decoder;
 
 use ringbuf::traits::Split;
@@ -13,7 +14,7 @@ use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::Duration;
 
-use crate::messages::{PlayerCommand, ProducerCommand, ProducerStatus};
+use crate::messages::{AudioOutput, PlayerCommand, ProducerCommand, ProducerStatus};
 
 fn main() {
     let audio_config = audio_config::AudioBufferConfig::default();
@@ -40,7 +41,7 @@ fn main() {
     let clips: Vec<clip::AudioClip> = clip_paths
         .iter()
         .map(|path| {
-            clip::AudioClip::new(Path::new(path), Some(Duration::from_millis(00_000)), None)
+            clip::AudioClip::new(Path::new(path), Some(Duration::from_millis(30_000)), None)
                 .expect("Failed to create audio clip")
         })
         .collect();
@@ -61,8 +62,16 @@ fn main() {
     let audio_done = Arc::new(AtomicBool::new(false));
     let audio_done_worker = audio_done.clone();
 
-    let (audio_player, playback_command_tx) =
+    let (mut audio_player, playback_command_tx) =
         playback::AudioPlayer::new(consumer, producer_request_tx.clone(), audio_config.clone());
+
+    // Create audio output channel for message passing
+    let (audio_output_tx, audio_output_rx) = crossbeam::channel::unbounded::<AudioOutput>();
+    audio_player.set_output_channel(audio_output_tx);
+
+    // Create and set up the visualizer
+    let visualizer = Arc::new(visualizer::AudioVisualizer::new(1024, 80));
+
     let stream = audio_player.create_stream();
 
     // Setup non-blocking stdin for CLI commands
@@ -87,8 +96,24 @@ fn main() {
         audio_done_worker,
     );
 
-    println!("🎮 Playback Controls:");
-    println!("  'p' - Play/Pause toggle");
+    // Start visualization thread that listens to audio output messages
+    let visualizer_for_display = visualizer.clone();
+    let audio_done_for_viz = audio_done.clone();
+    thread::spawn(move || {
+        while !audio_done_for_viz.load(std::sync::atomic::Ordering::Relaxed) {
+            // Process audio output messages
+            while let Ok(audio_output) = audio_output_rx.try_recv() {
+                for sample in audio_output.samples {
+                    visualizer_for_display.add_sample(sample);
+                }
+            }
+
+            visualizer::display_visualization(&visualizer_for_display);
+            thread::sleep(Duration::from_millis(50)); // 20 FPS
+        }
+    });
+
+    // Initial setup complete - visualization will display controls
 
     while !audio_done.load(std::sync::atomic::Ordering::Relaxed) {
         audio_player.process_commands();
@@ -104,30 +129,24 @@ fn main() {
                         break;
                     }
                 }
+                "q" => {
+                    break;
+                }
                 _ => {
-                    println!(
-                        "Unknown command: '{}'. Use 'p' to toggle playback.",
-                        input.trim()
-                    );
+                    // Silently ignore unknown commands to avoid interfering with visualization
                 }
             }
         }
 
-        // Check for producer status messages
+        // Check for producer status messages (but don't print to avoid interfering with visualization)
         match producer_status_rx.recv_timeout(std::time::Duration::from_millis(100)) {
             Ok(msg) => match msg {
                 ProducerStatus::DecodingDone => {
-                    println!("✅ Decoding done");
+                    // Silently handle completion
                 }
-                ProducerStatus::BufferFull => {
-                    println!("🔋 Buffer full");
-                }
-                ProducerStatus::RequestData => {
-                    println!("🪫 Requesting more data");
-                }
-                ProducerStatus::BufferUnderrun => {
-                    println!("⚠️ Buffer underrun, audio may stutter");
-                }
+                ProducerStatus::BufferFull => {}
+                ProducerStatus::RequestData => {}
+                ProducerStatus::BufferUnderrun => {}
                 ProducerStatus::BufferRecharge => {}
             },
             Err(_) => {}

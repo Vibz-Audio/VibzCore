@@ -21,3 +21,11 @@ pub enum PlayerCommand {
     Pause,
     TogglePlayPause,
 }
+
+/// Audio output data broadcast to interested listeners
+#[derive(Debug, Clone)]
+pub struct AudioOutput {
+    pub samples: Vec<f32>,
+    pub sample_rate: u32,
+    pub timestamp: std::time::Instant,
+}
