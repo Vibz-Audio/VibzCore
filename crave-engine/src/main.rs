@@ -4,7 +4,6 @@ mod clip;
 mod playback;
 mod wav_decoder;
 
-use crate::playback::PlaybackConfig;
 use ringbuf::traits::{Observer, Producer, Split};
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
@@ -22,7 +21,7 @@ enum ProcessingControlMessage {
     BufferUnderrun,
 }
 
-pub enum PlaybackMessage {
+pub enum AudioProducerMessage {
     RequestData,
 }
 
@@ -48,12 +47,10 @@ fn main() {
         "samples/crave.wav",
     ];
 
-    let PlaybackConfig { device, config, .. } = PlaybackConfig::new();
-
     let mut all_clips: Vec<clip::AudioClip> = clip_paths
         .iter()
         .map(|path| {
-            clip::AudioClip::new(Path::new(path), Some(Duration::from_millis(40_000)), None)
+            clip::AudioClip::new(Path::new(path), Some(Duration::from_millis(00_000)), None)
                 .expect("Failed to create audio clip")
         })
         .collect();
@@ -62,12 +59,12 @@ fn main() {
     let (mut producer, consumer) = rb.split();
 
     // MPC channels for communication
-    let (tx_playback, rx_playback) = mpsc::channel::<PlaybackMessage>();
+    let (tx_playback, rx_playback) = mpsc::channel::<AudioProducerMessage>();
     let (tx_control, rx_control) = mpsc::channel::<ProcessingControlMessage>();
     let tx_control_stream = tx_control.clone();
     let tx_control_worker = tx_control.clone();
     // Prevent buffer underrun at start
-    tx_playback.send(PlaybackMessage::RequestData).unwrap();
+    tx_playback.send(AudioProducerMessage::RequestData).unwrap();
 
     let audio_done = Arc::new(AtomicBool::new(false));
     let audio_paused = Arc::new(AtomicBool::new(true));
@@ -78,11 +75,8 @@ fn main() {
     let audio_d_on_worker = audio_done.clone();
     let first_run = Arc::new(AtomicBool::new(false));
 
-    let tx_playback_clone = tx_playback.clone();
-    let mut pb = playback::PlaybackController::new(consumer, tx_playback_clone, b_config.clone());
-
-    pb.dispatch(playback::PlaybackCommand::Play);
-    let stream = pb.stream();
+    let audio_player = playback::AudioPlayer::new(consumer, tx_playback.clone(), b_config.clone());
+    let stream = audio_player.create_stream();
 
     /* Worker thread for decoding and buffering */
     let mut sample_buf = all_clips
