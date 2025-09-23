@@ -1,9 +1,13 @@
 use cpal::SampleRate;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use crossbeam::channel::{Receiver, Sender, unbounded};
-use std::sync::Arc;
+use crossbeam::channel::{Receiver, Sender as SenderCB, unbounded};
+use ringbuf::storage::Heap;
+use ringbuf::traits::{Consumer, Observer, ring_buffer};
+use ringbuf::{HeapRb, SharedRb};
+use std::sync::mpsc::Sender;
+use std::sync::{Arc, Mutex};
 
-use crate::buffer_config;
+use crate::{PlaybackMessage, buffer_config};
 
 pub enum PlaybackCommand {
     Play,
@@ -16,19 +20,26 @@ enum PlaybackState {
     Paused,
 }
 
+type RingBuffer = ringbuf::CachingCons<Arc<SharedRb<Heap<f32>>>>;
+type PlaybackMsg = Sender<PlaybackMessage>;
+
 pub struct PlaybackController {
     pub state: Arc<PlaybackState>,
-    pub sender: Sender<PlaybackState>,
+    pub sender: SenderCB<PlaybackState>,
     pub recv: Receiver<PlaybackState>,
+    pub buffer_rx: Arc<Mutex<RingBuffer>>,
+    pub buffer_tx: PlaybackMsg,
 }
 
 impl PlaybackController {
-    pub fn new() -> Self {
+    pub fn new(buffer: RingBuffer, pb_msg: PlaybackMsg) -> Self {
         let (sender, recv) = unbounded();
         Self {
             state: PlaybackState::Paused.into(),
             sender,
             recv,
+            buffer_rx: Arc::new(buffer.into()),
+            buffer_tx: pb_msg,
         }
     }
 
@@ -40,52 +51,46 @@ impl PlaybackController {
         }
     }
 
-    pub fn stream(&self) {
+    pub fn stream(&self) -> cpal::Stream {
         let PlaybackConfig { device, config, .. } = PlaybackConfig::new();
-
         let pb_state = self.recv.clone();
+        let consumer = self.buffer_rx.clone();
 
-        let stream = device
+        device
             .build_output_stream(
                 &config,
                 move |data: &mut [f32], cb: &cpal::OutputCallbackInfo| {
-                    println!("OutputCallbackInfo: {:?}", cb);
-                    match pb_state.try_recv().unwrap() {
-                        PlaybackState::Playing => {
-                            println!("PlaybackState::Playing");
-                            for sample in data.iter_mut() {
-                                *sample = 0.0; // Placeholder for actual audio data
-                            }
-                        }
-                        PlaybackState::Paused => {
-                            println!("PlaybackState::Paused");
-                            for sample in data.iter_mut() {
-                                *sample = 0.0; // Silence when paused
-                            }
-                        }
+                    let mut consumer = consumer.lock().unwrap();
+
+                    if consumer.occupied_len() < data.len() {
+                        // If there's not enough data, send a message to pause playback
+                        let _ = pb_state.try_recv();
                     }
+
+                    for sample in data.iter_mut() {
+                        let _ = consumer.try_pop().unwrap_or(0.0);
+                        *sample = consumer.try_pop().unwrap_or(0.0);
+                    }
+                    drop(consumer);
                 },
                 |err| {
                     eprint!("An error occured");
                 },
                 None,
             )
-            .unwrap();
-
-        stream.play().unwrap();
+            .unwrap()
     }
 
     fn play(&mut self) {
         if let PlaybackState::Paused = self.state.as_ref() {
             self.state = PlaybackState::Playing.into();
-            println!("Playback started");
         }
     }
 
     fn pause(&mut self) {
         if let PlaybackState::Playing = self.state.as_ref() {
             self.state = PlaybackState::Paused.into();
-            println!("Playback paused");
+            self.sender.send(PlaybackState::Paused).unwrap();
         }
     }
 

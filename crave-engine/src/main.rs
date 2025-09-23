@@ -4,8 +4,8 @@ mod clip;
 mod playback;
 mod wav_decoder;
 
-use cpal::SampleRate;
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::traits::{DeviceTrait, StreamTrait};
+use crossbeam::queue::ArrayQueue;
 use ringbuf::traits::{Consumer, Observer, Producer, Split};
 use std::io::BufRead;
 use std::path::Path;
@@ -26,7 +26,7 @@ enum ProcessingControlMessage {
     BufferUnderrun,
 }
 
-enum PlaybackMessage {
+pub enum PlaybackMessage {
     RequestData,
 }
 
@@ -85,53 +85,60 @@ fn main() {
     let audio_d_on_worker = audio_done.clone();
     let first_run = Arc::new(AtomicBool::new(false));
 
+    let tx_playback_clone = tx_playback.clone();
+    let mut pb = playback::PlaybackController::new(consumer, tx_playback_clone);
+    // pb.sender.try_send(msg)
+    pb.dispatch(playback::PlaybackCommand::Play);
+    let stream = pb.stream();
+    // stream.play().unwrap();
+
     /* Audio output stream */
-    let stream = device
-        .build_output_stream(
-            &config,
-            move |data: &mut [f32], cb: &cpal::OutputCallbackInfo| {
-                // Pause handling
-                if audio_p_on_stream.load(std::sync::atomic::Ordering::Relaxed) {
-                    for sample in data.iter_mut() {
-                        *sample = 0.0;
-                    }
-                    return;
-                }
-                if consumer.occupied_len() < b_config.tolerance {
-                    tx_control_stream
-                        .send(ProcessingControlMessage::RequestData)
-                        .ok();
-                    if tx_playback.send(PlaybackMessage::RequestData).is_err() {
-                        audio_d_on_stream.store(true, std::sync::atomic::Ordering::Relaxed);
-                        return;
-                    }
-                }
-
-                for (idx, sample) in data.iter_mut().enumerate() {
-                    // Has audio data
-                    if consumer.occupied_len() > 0 {
-                        let _ = consumer.try_pop().unwrap_or(0.0);
-                        let val = consumer.try_pop().unwrap_or(0.0);
-                        *sample = val;
-                    } else {
-                        if !audio_d_on_stream.load(std::sync::atomic::Ordering::Relaxed) {
-                            tx_control_stream
-                                .send(ProcessingControlMessage::BufferUnderrun)
-                                .ok();
-                        }
-                        *sample = 0.0; // empty audio
-                    }
-                }
-            },
-            move |err| {
-                print!("An error occured");
-            },
-            None,
-        )
-        .unwrap();
-
-    stream.play().unwrap();
-    audio_paused.store(false, std::sync::atomic::Ordering::Relaxed);
+    // let stream = device
+    //     .build_output_stream(
+    //         &config,
+    //         move |data: &mut [f32], cb: &cpal::OutputCallbackInfo| {
+    //             // Pause handling
+    //             if audio_p_on_stream.load(std::sync::atomic::Ordering::Relaxed) {
+    //                 for sample in data.iter_mut() {
+    //                     *sample = 0.0;
+    //                 }
+    //                 return;
+    //             }
+    //             if consumer.occupied_len() < b_config.tolerance {
+    //                 tx_control_stream
+    //                     .send(ProcessingControlMessage::RequestData)
+    //                     .ok();
+    //                 if tx_playback.send(PlaybackMessage::RequestData).is_err() {
+    //                     audio_d_on_stream.store(true, std::sync::atomic::Ordering::Relaxed);
+    //                     return;
+    //                 }
+    //             }
+    //
+    //             for (idx, sample) in data.iter_mut().enumerate() {
+    //                 // Has audio data
+    //                 if consumer.occupied_len() > 0 {
+    //                     let _ = consumer.try_pop().unwrap_or(0.0);
+    //                     let val = consumer.try_pop().unwrap_or(0.0);
+    //                     *sample = val;
+    //                 } else {
+    //                     if !audio_d_on_stream.load(std::sync::atomic::Ordering::Relaxed) {
+    //                         tx_control_stream
+    //                             .send(ProcessingControlMessage::BufferUnderrun)
+    //                             .ok();
+    //                     }
+    //                     *sample = 0.0; // empty audio
+    //                 }
+    //             }
+    //         },
+    //         move |err| {
+    //             print!("An error occured");
+    //         },
+    //         None,
+    //     )
+    //     .unwrap();
+    //
+    // stream.play().unwrap();
+    // audio_paused.store(false, std::sync::atomic::Ordering::Relaxed);
 
     /* Worker thread for decoding and buffering */
     let mut sample_buf = all_clips
@@ -143,9 +150,9 @@ fn main() {
         'outer: loop {
             if let Ok(msg) = rx_playback.try_recv() {
                 loop {
-                    if audio_p_on_worker.load(std::sync::atomic::Ordering::Relaxed) {
-                        break;
-                    }
+                    // if audio_p_on_worker.load(std::sync::atomic::Ordering::Relaxed) {
+                    //     break;
+                    // }
                     if producer.occupied_len() > b_config.threshold {
                         tx_control_worker
                             .send(ProcessingControlMessage::BufferFull)
@@ -249,23 +256,23 @@ fn main() {
         }
 
         // Simple CLI for pausing/resuming
-        let stdin = std::io::stdin();
-        let lines = stdin.lock().lines();
-
-        for line in lines {
-            let input = line.unwrap();
-
-            if input.trim() == "p" {
-                let paused = audio_paused.load(std::sync::atomic::Ordering::Relaxed);
-                if paused {
-                    println!("Resuming...");
-                    audio_paused.store(false, std::sync::atomic::Ordering::Relaxed);
-                } else {
-                    println!("Pausing...");
-                    audio_paused.store(true, std::sync::atomic::Ordering::Relaxed);
-                }
-            }
-        }
+        // let stdin = std::io::stdin();
+        // let lines = stdin.lock().lines();
+        //
+        // for line in lines {
+        //     let input = line.unwrap();
+        //
+        //     if input.trim() == "p" {
+        //         let paused = audio_paused.load(std::sync::atomic::Ordering::Relaxed);
+        //         if paused {
+        //             println!("Resuming...");
+        //             audio_paused.store(false, std::sync::atomic::Ordering::Relaxed);
+        //         } else {
+        //             println!("Pausing...");
+        //             audio_paused.store(true, std::sync::atomic::Ordering::Relaxed);
+        //         }
+        //     }
+        // }
     }
 
     while !audio_done.load(std::sync::atomic::Ordering::Relaxed) {
