@@ -1,12 +1,23 @@
 use cpal::SampleRate;
 use cpal::traits::{DeviceTrait, HostTrait};
+use crossbeam::channel::{Receiver, Sender as CbSender, unbounded};
 use ringbuf::SharedRb;
 use ringbuf::storage::Heap;
 use ringbuf::traits::{Consumer, Observer};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
 use crate::{AudioProducerMessage, buffer_config};
+
+const SILENCE_SAMPLE: f32 = 0.0;
+
+#[derive(Debug, Clone)]
+pub enum AudioPlayerCommand {
+    Play,
+    Pause,
+    TogglePlayPause,
+}
 
 type RingBuffer = ringbuf::CachingCons<Arc<SharedRb<Heap<f32>>>>;
 
@@ -14,6 +25,8 @@ pub struct AudioPlayer {
     consumer: Arc<Mutex<RingBuffer>>,
     data_request_tx: Sender<AudioProducerMessage>,
     config: buffer_config::AudioBufferConfig,
+    audio_player_cmd_rx: Receiver<AudioPlayerCommand>,
+    is_paused: Arc<AtomicBool>,
 }
 
 impl AudioPlayer {
@@ -21,12 +34,37 @@ impl AudioPlayer {
         consumer: RingBuffer,
         data_request_tx: Sender<AudioProducerMessage>,
         config: buffer_config::AudioBufferConfig,
-    ) -> Self {
-        Self {
+    ) -> (Self, CbSender<AudioPlayerCommand>) {
+        let (command_tx, command_rx) = unbounded();
+        let player = Self {
             consumer: Arc::new(Mutex::new(consumer)),
             data_request_tx,
             config,
+            audio_player_cmd_rx: command_rx,
+            is_paused: Arc::new(AtomicBool::new(false)), // Start playing
+        };
+        (player, command_tx)
+    }
+
+    pub fn dispatch(&self, command: AudioPlayerCommand) {
+        match command {
+            AudioPlayerCommand::Play => self.is_paused.store(false, Ordering::Relaxed),
+            AudioPlayerCommand::Pause => self.is_paused.store(true, Ordering::Relaxed),
+            AudioPlayerCommand::TogglePlayPause => {
+                let was_paused = self.is_paused.load(Ordering::Relaxed);
+                self.is_paused.store(!was_paused, Ordering::Relaxed);
+            }
         }
+    }
+
+    pub fn process_commands(&self) {
+        while let Ok(command) = self.audio_player_cmd_rx.try_recv() {
+            self.dispatch(command);
+        }
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.is_paused.load(Ordering::Relaxed)
     }
 
     pub fn create_stream(&self) -> cpal::Stream {
@@ -36,11 +74,19 @@ impl AudioPlayer {
         let consumer = self.consumer.clone();
         let data_request_tx = self.data_request_tx.clone();
         let tolerance = self.config.tolerance;
+        let is_paused = self.is_paused.clone();
 
         device
             .build_output_stream(
                 &stream_config,
                 move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                    if is_paused.load(Ordering::Relaxed) {
+                        for sample in data.iter_mut() {
+                            *sample = SILENCE_SAMPLE
+                        }
+                        return;
+                    }
+
                     let mut consumer = consumer.lock().unwrap();
 
                     if consumer.occupied_len() < tolerance {
@@ -49,10 +95,10 @@ impl AudioPlayer {
 
                     for sample in data.iter_mut() {
                         if consumer.occupied_len() > 0 {
-                            let _ = consumer.try_pop().unwrap_or(0.0); // Skip left channel or first sample
-                            *sample = consumer.try_pop().unwrap_or(0.0); // Get right channel or actual sample
+                            let _ = consumer.try_pop().unwrap_or(SILENCE_SAMPLE); // Skip left channel or first sample
+                            *sample = consumer.try_pop().unwrap_or(SILENCE_SAMPLE); // Get right channel or actual sample
                         } else {
-                            *sample = 0.0;
+                            *sample = SILENCE_SAMPLE;
                         }
                     }
                 },

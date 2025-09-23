@@ -58,25 +58,34 @@ fn main() {
     let rb = b_config.create_ring_buffer();
     let (mut producer, consumer) = rb.split();
 
-    // MPC channels for communication
+    // Channels for communication
     let (tx_playback, rx_playback) = mpsc::channel::<AudioProducerMessage>();
     let (tx_control, rx_control) = mpsc::channel::<ProcessingControlMessage>();
-    let tx_control_stream = tx_control.clone();
     let tx_control_worker = tx_control.clone();
+
     // Prevent buffer underrun at start
     tx_playback.send(AudioProducerMessage::RequestData).unwrap();
 
     let audio_done = Arc::new(AtomicBool::new(false));
-    let audio_paused = Arc::new(AtomicBool::new(true));
+    let audio_done_worker = audio_done.clone();
 
-    let audio_p_on_worker = audio_paused.clone();
-    let audio_p_on_stream = audio_paused.clone();
-    let audio_d_on_stream = audio_done.clone();
-    let audio_d_on_worker = audio_done.clone();
-    let first_run = Arc::new(AtomicBool::new(false));
-
-    let audio_player = playback::AudioPlayer::new(consumer, tx_playback.clone(), b_config.clone());
+    let (audio_player, command_sender) =
+        playback::AudioPlayer::new(consumer, tx_playback.clone(), b_config.clone());
     let stream = audio_player.create_stream();
+
+    // Setup non-blocking stdin for CLI commands
+    let (cli_tx, cli_rx) = mpsc::channel::<String>();
+    thread::spawn(move || {
+        use std::io::BufRead;
+        let stdin = std::io::stdin();
+        for line in stdin.lock().lines() {
+            if let Ok(input) = line {
+                if cli_tx.send(input).is_err() {
+                    break;
+                }
+            }
+        }
+    });
 
     /* Worker thread for decoding and buffering */
     let mut sample_buf = all_clips
@@ -84,7 +93,6 @@ fn main() {
         .map(|_| None)
         .collect::<Vec<Option<SampleBuffer<f32>>>>();
     thread::spawn(move || {
-        first_run.store(true, std::sync::atomic::Ordering::Relaxed);
         'outer: loop {
             if let Ok(msg) = rx_playback.try_recv() {
                 loop {
@@ -150,7 +158,7 @@ fn main() {
                             .send(ProcessingControlMessage::DecodingDone)
                             .ok();
                         if producer.is_empty() {
-                            audio_d_on_worker.store(true, std::sync::atomic::Ordering::Relaxed);
+                            audio_done_worker.store(true, std::sync::atomic::Ordering::Relaxed);
                             break 'outer;
                         }
                     }
@@ -161,56 +169,50 @@ fn main() {
         }
     });
 
-    /* Main thread for control messages and UI */
-    while !audio_done.load(std::sync::atomic::Ordering::Relaxed) {
-        match rx_control.recv() {
-            Ok(msg) => {
-                // Clear terminal
-                // print!("\x1B[2J\x1B[1;1H");
-                // std::io::stdout().flush().unwrap();
+    println!("🎮 Playback Controls:");
+    println!("  'p' - Play/Pause toggle");
 
-                match msg {
-                    ProcessingControlMessage::DecodingDone => {
-                        println!("✅ Decoding done");
-                    }
-                    ProcessingControlMessage::BufferFull => {
-                        println!("🔋 Buffer full");
-                    }
-                    ProcessingControlMessage::RequestData => {
-                        println!("🪫 Requesting more data");
-                    }
-                    ProcessingControlMessage::BufferUnderrun => {
-                        println!("⚠️ Buffer underrun, audio may stutter");
-                    }
-                    ProcessingControlMessage::BufferRecharge => {
-                        // println!("🔄 Recharging buffer");
+    while !audio_done.load(std::sync::atomic::Ordering::Relaxed) {
+        audio_player.process_commands();
+
+        // Check for CLI commands (non-blocking)
+        if let Ok(input) = cli_rx.try_recv() {
+            match input.trim() {
+                "p" => {
+                    if command_sender
+                        .send(playback::AudioPlayerCommand::TogglePlayPause)
+                        .is_err()
+                    {
+                        break;
                     }
                 }
+                _ => {
+                    println!(
+                        "Unknown command: '{}'. Use 'p' to toggle playback.",
+                        input.trim()
+                    );
+                }
             }
-            Err(_) => break,
         }
 
-        // Simple CLI for pausing/resuming
-        // let stdin = std::io::stdin();
-        // let lines = stdin.lock().lines();
-        //
-        // for line in lines {
-        //     let input = line.unwrap();
-        //
-        //     if input.trim() == "p" {
-        //         let paused = audio_paused.load(std::sync::atomic::Ordering::Relaxed);
-        //         if paused {
-        //             println!("Resuming...");
-        //             audio_paused.store(false, std::sync::atomic::Ordering::Relaxed);
-        //         } else {
-        //             println!("Pausing...");
-        //             audio_paused.store(true, std::sync::atomic::Ordering::Relaxed);
-        //         }
-        //     }
-        // }
-    }
-
-    while !audio_done.load(std::sync::atomic::Ordering::Relaxed) {
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        // Check for processing control messages
+        match rx_control.recv_timeout(std::time::Duration::from_millis(100)) {
+            Ok(msg) => match msg {
+                ProcessingControlMessage::DecodingDone => {
+                    println!("✅ Decoding done");
+                }
+                ProcessingControlMessage::BufferFull => {
+                    println!("🔋 Buffer full");
+                }
+                ProcessingControlMessage::RequestData => {
+                    println!("🪫 Requesting more data");
+                }
+                ProcessingControlMessage::BufferUnderrun => {
+                    println!("⚠️ Buffer underrun, audio may stutter");
+                }
+                ProcessingControlMessage::BufferRecharge => {}
+            },
+            Err(_) => {}
+        }
     }
 }
