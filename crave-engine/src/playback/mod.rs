@@ -8,33 +8,26 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
-use crate::{AudioProducerMessage, buffer_config};
+use crate::{messages::{ProducerCommand, PlayerCommand}, audio_config};
 
 const SILENCE_SAMPLE: f32 = 0.0;
-
-#[derive(Debug, Clone)]
-pub enum AudioPlayerCommand {
-    Play,
-    Pause,
-    TogglePlayPause,
-}
 
 type RingBuffer = ringbuf::CachingCons<Arc<SharedRb<Heap<f32>>>>;
 
 pub struct AudioPlayer {
     consumer: Arc<Mutex<RingBuffer>>,
-    data_request_tx: Sender<AudioProducerMessage>,
-    config: buffer_config::AudioBufferConfig,
-    audio_player_cmd_rx: Receiver<AudioPlayerCommand>,
+    data_request_tx: Sender<ProducerCommand>,
+    config: audio_config::AudioBufferConfig,
+    audio_player_cmd_rx: Receiver<PlayerCommand>,
     is_paused: Arc<AtomicBool>,
 }
 
 impl AudioPlayer {
     pub fn new(
         consumer: RingBuffer,
-        data_request_tx: Sender<AudioProducerMessage>,
-        config: buffer_config::AudioBufferConfig,
-    ) -> (Self, CbSender<AudioPlayerCommand>) {
+        data_request_tx: Sender<ProducerCommand>,
+        config: audio_config::AudioBufferConfig,
+    ) -> (Self, CbSender<PlayerCommand>) {
         let (command_tx, command_rx) = unbounded();
         let player = Self {
             consumer: Arc::new(Mutex::new(consumer)),
@@ -46,11 +39,11 @@ impl AudioPlayer {
         (player, command_tx)
     }
 
-    pub fn dispatch(&self, command: AudioPlayerCommand) {
+    pub fn dispatch(&self, command: PlayerCommand) {
         match command {
-            AudioPlayerCommand::Play => self.is_paused.store(false, Ordering::Relaxed),
-            AudioPlayerCommand::Pause => self.is_paused.store(true, Ordering::Relaxed),
-            AudioPlayerCommand::TogglePlayPause => {
+            PlayerCommand::Play => self.is_paused.store(false, Ordering::Relaxed),
+            PlayerCommand::Pause => self.is_paused.store(true, Ordering::Relaxed),
+            PlayerCommand::TogglePlayPause => {
                 let was_paused = self.is_paused.load(Ordering::Relaxed);
                 self.is_paused.store(!was_paused, Ordering::Relaxed);
             }
@@ -90,7 +83,7 @@ impl AudioPlayer {
                     let mut consumer = consumer.lock().unwrap();
 
                     if consumer.occupied_len() < tolerance {
-                        let _ = data_request_tx.send(AudioProducerMessage::RequestData);
+                        let _ = data_request_tx.send(ProducerCommand::RequestData);
                     }
 
                     for sample in data.iter_mut() {

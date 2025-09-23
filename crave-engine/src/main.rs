@@ -1,32 +1,22 @@
 #![allow(unused_variables)]
-mod buffer_config;
+mod audio_config;
 mod clip;
+mod messages;
 mod playback;
+mod producer;
 mod wav_decoder;
 
-use ringbuf::traits::{Observer, Producer, Split};
+use ringbuf::traits::Split;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::Duration;
-use symphonia::core::audio::SampleBuffer;
-use symphonia::core::errors::Error;
 
-enum ProcessingControlMessage {
-    RequestData,
-    DecodingDone,
-    BufferFull,
-    BufferRecharge,
-    BufferUnderrun,
-}
-
-pub enum AudioProducerMessage {
-    RequestData,
-}
+use crate::messages::{PlayerCommand, ProducerCommand, ProducerStatus};
 
 fn main() {
-    let b_config = buffer_config::AudioBufferConfig::default();
+    let audio_config = audio_config::AudioBufferConfig::default();
 
     let clip_paths = vec![
         // "samples/trackouts/dnb/01_Drumloop1.wav",
@@ -47,7 +37,7 @@ fn main() {
         "samples/crave.wav",
     ];
 
-    let mut all_clips: Vec<clip::AudioClip> = clip_paths
+    let clips: Vec<clip::AudioClip> = clip_paths
         .iter()
         .map(|path| {
             clip::AudioClip::new(Path::new(path), Some(Duration::from_millis(00_000)), None)
@@ -55,119 +45,47 @@ fn main() {
         })
         .collect();
 
-    let rb = b_config.create_ring_buffer();
-    let (mut producer, consumer) = rb.split();
+    let rb = audio_config.create_ring_buffer();
+    let (producer, consumer) = rb.split();
 
     // Channels for communication
-    let (tx_playback, rx_playback) = mpsc::channel::<AudioProducerMessage>();
-    let (tx_control, rx_control) = mpsc::channel::<ProcessingControlMessage>();
-    let tx_control_worker = tx_control.clone();
+    let (producer_request_tx, producer_request_rx) = mpsc::channel::<ProducerCommand>();
+    let (producer_status_tx, producer_status_rx) = mpsc::channel::<ProducerStatus>();
+    let producer_status_tx_clone = producer_status_tx.clone();
 
     // Prevent buffer underrun at start
-    tx_playback.send(AudioProducerMessage::RequestData).unwrap();
+    producer_request_tx
+        .send(ProducerCommand::RequestData)
+        .unwrap();
 
     let audio_done = Arc::new(AtomicBool::new(false));
     let audio_done_worker = audio_done.clone();
 
-    let (audio_player, command_sender) =
-        playback::AudioPlayer::new(consumer, tx_playback.clone(), b_config.clone());
+    let (audio_player, playback_command_tx) =
+        playback::AudioPlayer::new(consumer, producer_request_tx.clone(), audio_config.clone());
     let stream = audio_player.create_stream();
 
     // Setup non-blocking stdin for CLI commands
-    let (cli_tx, cli_rx) = mpsc::channel::<String>();
+    let (cli_input_tx, cli_input_rx) = mpsc::channel::<String>();
     thread::spawn(move || {
         use std::io::BufRead;
         let stdin = std::io::stdin();
         for line in stdin.lock().lines() {
             if let Ok(input) = line {
-                if cli_tx.send(input).is_err() {
+                if cli_input_tx.send(input).is_err() {
                     break;
                 }
             }
         }
     });
 
-    /* Worker thread for decoding and buffering */
-    let mut sample_buf = all_clips
-        .iter()
-        .map(|_| None)
-        .collect::<Vec<Option<SampleBuffer<f32>>>>();
-    thread::spawn(move || {
-        'outer: loop {
-            if let Ok(msg) = rx_playback.try_recv() {
-                loop {
-                    if producer.occupied_len() > b_config.threshold {
-                        tx_control_worker
-                            .send(ProcessingControlMessage::BufferFull)
-                            .ok();
-                        break;
-                    }
-                    let mut mixed_samples: Vec<f32> = Vec::new();
-                    let mut any_decoded = false;
-
-                    // Decode from all clips and mix them together
-                    for (idx, clip) in all_clips.iter_mut().enumerate() {
-                        match clip.decode() {
-                            Ok(_decoded) => {
-                                any_decoded = true;
-                                if sample_buf[idx].is_none() {
-                                    let spec = *_decoded.spec();
-                                    let duration = _decoded.capacity() as u64;
-                                    sample_buf[idx] =
-                                        Some(SampleBuffer::<f32>::new(duration, spec));
-                                }
-                                if let Some(buf) = &mut sample_buf[idx] {
-                                    buf.copy_interleaved_ref(_decoded);
-                                    let samples = buf.samples();
-
-                                    // We never wrote into the buffer
-                                    if mixed_samples.is_empty() {
-                                        mixed_samples = samples.to_vec();
-                                    } else {
-                                        // Mixing
-                                        for (i, &sample) in samples.iter().enumerate() {
-                                            if i < mixed_samples.len() {
-                                                mixed_samples[i] += sample / 2.0;
-                                            } else {
-                                                // In case clips are of different lengths
-                                                mixed_samples.push(sample);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            Err(Error::ResetRequired) => {
-                                println!("Decoder reset required for a clip");
-                                break;
-                            }
-                            Err(_) => {
-                                // This clip is done, continue with other clips
-                            }
-                        }
-                    }
-
-                    // Push mixed audio to ring buffer if we have any samples
-                    if any_decoded && !mixed_samples.is_empty() {
-                        tx_control_worker
-                            .send(ProcessingControlMessage::BufferRecharge)
-                            .ok();
-                        producer.push_slice(&mixed_samples);
-                    } else {
-                        // All clips are done
-                        tx_control_worker
-                            .send(ProcessingControlMessage::DecodingDone)
-                            .ok();
-                        if producer.is_empty() {
-                            audio_done_worker.store(true, std::sync::atomic::Ordering::Relaxed);
-                            break 'outer;
-                        }
-                    }
-                }
-            } else {
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            }
-        }
-    });
+    /* Start audio producer */
+    let audio_producer = producer::AudioProducer::new(clips, producer, audio_config.clone());
+    audio_producer.start_production(
+        producer_request_rx,
+        producer_status_tx_clone,
+        audio_done_worker,
+    );
 
     println!("🎮 Playback Controls:");
     println!("  'p' - Play/Pause toggle");
@@ -176,11 +94,11 @@ fn main() {
         audio_player.process_commands();
 
         // Check for CLI commands (non-blocking)
-        if let Ok(input) = cli_rx.try_recv() {
+        if let Ok(input) = cli_input_rx.try_recv() {
             match input.trim() {
                 "p" => {
-                    if command_sender
-                        .send(playback::AudioPlayerCommand::TogglePlayPause)
+                    if playback_command_tx
+                        .send(PlayerCommand::TogglePlayPause)
                         .is_err()
                     {
                         break;
@@ -195,22 +113,22 @@ fn main() {
             }
         }
 
-        // Check for processing control messages
-        match rx_control.recv_timeout(std::time::Duration::from_millis(100)) {
+        // Check for producer status messages
+        match producer_status_rx.recv_timeout(std::time::Duration::from_millis(100)) {
             Ok(msg) => match msg {
-                ProcessingControlMessage::DecodingDone => {
+                ProducerStatus::DecodingDone => {
                     println!("✅ Decoding done");
                 }
-                ProcessingControlMessage::BufferFull => {
+                ProducerStatus::BufferFull => {
                     println!("🔋 Buffer full");
                 }
-                ProcessingControlMessage::RequestData => {
+                ProducerStatus::RequestData => {
                     println!("🪫 Requesting more data");
                 }
-                ProcessingControlMessage::BufferUnderrun => {
+                ProducerStatus::BufferUnderrun => {
                     println!("⚠️ Buffer underrun, audio may stutter");
                 }
-                ProcessingControlMessage::BufferRecharge => {}
+                ProducerStatus::BufferRecharge => {}
             },
             Err(_) => {}
         }
