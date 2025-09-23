@@ -1,9 +1,9 @@
 use cpal::SampleRate;
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::traits::{DeviceTrait, HostTrait};
 use crossbeam::channel::{Receiver, Sender as SenderCB, unbounded};
+use ringbuf::SharedRb;
 use ringbuf::storage::Heap;
-use ringbuf::traits::{Consumer, Observer, ring_buffer};
-use ringbuf::{HeapRb, SharedRb};
+use ringbuf::traits::{Consumer, Observer};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
@@ -28,18 +28,24 @@ pub struct PlaybackController {
     pub sender: SenderCB<PlaybackState>,
     pub recv: Receiver<PlaybackState>,
     pub buffer_rx: Arc<Mutex<RingBuffer>>,
-    pub buffer_tx: PlaybackMsg,
+    pub producer_tx: PlaybackMsg,
+    pub buffer_config: buffer_config::AudioBufferConfig,
 }
 
 impl PlaybackController {
-    pub fn new(buffer: RingBuffer, pb_msg: PlaybackMsg) -> Self {
+    pub fn new(
+        buffer: RingBuffer,
+        pb_msg: PlaybackMsg,
+        buffer_config: buffer_config::AudioBufferConfig,
+    ) -> Self {
         let (sender, recv) = unbounded();
         Self {
             state: PlaybackState::Paused.into(),
             sender,
             recv,
             buffer_rx: Arc::new(buffer.into()),
-            buffer_tx: pb_msg,
+            producer_tx: pb_msg,
+            buffer_config,
         }
     }
 
@@ -55,23 +61,39 @@ impl PlaybackController {
         let PlaybackConfig { device, config, .. } = PlaybackConfig::new();
         let pb_state = self.recv.clone();
         let consumer = self.buffer_rx.clone();
+        let producer_tx = self.producer_tx.clone();
+        let buffer_config = self.buffer_config.clone();
 
         device
             .build_output_stream(
                 &config,
                 move |data: &mut [f32], cb: &cpal::OutputCallbackInfo| {
+                    if let Ok(PlaybackState::Paused) = pb_state.try_recv() {
+                        for sample in data.iter_mut() {
+                            *sample = 0.0;
+                        }
+                        return;
+                    }
+
                     let mut consumer = consumer.lock().unwrap();
 
-                    if consumer.occupied_len() < data.len() {
-                        // If there's not enough data, send a message to pause playback
-                        let _ = pb_state.try_recv();
+                    if consumer.occupied_len() < buffer_config.tolerance {
+                        if producer_tx.send(PlaybackMessage::RequestData).is_err() {
+                            for sample in data.iter_mut() {
+                                *sample = 0.0;
+                            }
+                            return;
+                        }
                     }
 
                     for sample in data.iter_mut() {
-                        let _ = consumer.try_pop().unwrap_or(0.0);
-                        *sample = consumer.try_pop().unwrap_or(0.0);
+                        if consumer.occupied_len() > 0 {
+                            let _ = consumer.try_pop().unwrap_or(0.0);
+                            *sample = consumer.try_pop().unwrap_or(0.0);
+                        } else {
+                            *sample = 0.0; // empty audio when buffer is empty
+                        }
                     }
-                    drop(consumer);
                 },
                 |err| {
                     eprint!("An error occured");

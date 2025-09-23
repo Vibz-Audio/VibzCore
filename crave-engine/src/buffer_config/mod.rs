@@ -1,8 +1,8 @@
 use ringbuf::SharedRb;
 use ringbuf::storage::Heap;
 
+#[derive(Clone)]
 pub struct AudioBufferConfig {
-    pub rb: SharedRb<Heap<f32>>,
     /** Playback sample rate */
     pub sample_rate: u32,
     /** Lookahead time in seconds */
@@ -21,13 +21,16 @@ impl AudioBufferConfig {
         let threshold: usize = capacity - 1024; // Threshold to consider buffer "full"
         let tolerance: usize = capacity / 2;
         AudioBufferConfig {
-            rb: SharedRb::<Heap<f32>>::new(capacity),
             lookahead,
             sample_rate,
             capacity,
             threshold,
             tolerance,
         }
+    }
+
+    pub fn create_ring_buffer(&self) -> SharedRb<Heap<f32>> {
+        SharedRb::<Heap<f32>>::new(self.capacity)
     }
 }
 
@@ -39,7 +42,6 @@ impl Default for AudioBufferConfig {
         let threshold: usize = capacity - 1024; // Threshold to consider buffer "full"
         let tolerance: usize = capacity / 2;
         AudioBufferConfig {
-            rb: SharedRb::<Heap<f32>>::new(capacity),
             lookahead,
             sample_rate,
             capacity,

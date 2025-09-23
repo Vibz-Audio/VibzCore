@@ -4,10 +4,8 @@ mod clip;
 mod playback;
 mod wav_decoder;
 
-use cpal::traits::{DeviceTrait, StreamTrait};
-use crossbeam::queue::ArrayQueue;
-use ringbuf::traits::{Consumer, Observer, Producer, Split};
-use std::io::BufRead;
+use crate::playback::PlaybackConfig;
+use ringbuf::traits::{Observer, Producer, Split};
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, mpsc};
@@ -15,8 +13,6 @@ use std::thread;
 use std::time::Duration;
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::errors::Error;
-
-use crate::playback::PlaybackConfig;
 
 enum ProcessingControlMessage {
     RequestData,
@@ -54,19 +50,16 @@ fn main() {
 
     let PlaybackConfig { device, config, .. } = PlaybackConfig::new();
 
-    //#region SEQUENCER
     let mut all_clips: Vec<clip::AudioClip> = clip_paths
         .iter()
         .map(|path| {
-            clip::AudioClip::new(Path::new(path), Some(Duration::from_millis(00_000)), None)
+            clip::AudioClip::new(Path::new(path), Some(Duration::from_millis(40_000)), None)
                 .expect("Failed to create audio clip")
         })
         .collect();
-    // Ring Buffer for audio samples
-    let rb = b_config.rb;
-    let (mut producer, mut consumer) = rb.split();
 
-    //#endregion
+    let rb = b_config.create_ring_buffer();
+    let (mut producer, consumer) = rb.split();
 
     // MPC channels for communication
     let (tx_playback, rx_playback) = mpsc::channel::<PlaybackMessage>();
@@ -86,59 +79,10 @@ fn main() {
     let first_run = Arc::new(AtomicBool::new(false));
 
     let tx_playback_clone = tx_playback.clone();
-    let mut pb = playback::PlaybackController::new(consumer, tx_playback_clone);
-    // pb.sender.try_send(msg)
+    let mut pb = playback::PlaybackController::new(consumer, tx_playback_clone, b_config.clone());
+
     pb.dispatch(playback::PlaybackCommand::Play);
     let stream = pb.stream();
-    // stream.play().unwrap();
-
-    /* Audio output stream */
-    // let stream = device
-    //     .build_output_stream(
-    //         &config,
-    //         move |data: &mut [f32], cb: &cpal::OutputCallbackInfo| {
-    //             // Pause handling
-    //             if audio_p_on_stream.load(std::sync::atomic::Ordering::Relaxed) {
-    //                 for sample in data.iter_mut() {
-    //                     *sample = 0.0;
-    //                 }
-    //                 return;
-    //             }
-    //             if consumer.occupied_len() < b_config.tolerance {
-    //                 tx_control_stream
-    //                     .send(ProcessingControlMessage::RequestData)
-    //                     .ok();
-    //                 if tx_playback.send(PlaybackMessage::RequestData).is_err() {
-    //                     audio_d_on_stream.store(true, std::sync::atomic::Ordering::Relaxed);
-    //                     return;
-    //                 }
-    //             }
-    //
-    //             for (idx, sample) in data.iter_mut().enumerate() {
-    //                 // Has audio data
-    //                 if consumer.occupied_len() > 0 {
-    //                     let _ = consumer.try_pop().unwrap_or(0.0);
-    //                     let val = consumer.try_pop().unwrap_or(0.0);
-    //                     *sample = val;
-    //                 } else {
-    //                     if !audio_d_on_stream.load(std::sync::atomic::Ordering::Relaxed) {
-    //                         tx_control_stream
-    //                             .send(ProcessingControlMessage::BufferUnderrun)
-    //                             .ok();
-    //                     }
-    //                     *sample = 0.0; // empty audio
-    //                 }
-    //             }
-    //         },
-    //         move |err| {
-    //             print!("An error occured");
-    //         },
-    //         None,
-    //     )
-    //     .unwrap();
-    //
-    // stream.play().unwrap();
-    // audio_paused.store(false, std::sync::atomic::Ordering::Relaxed);
 
     /* Worker thread for decoding and buffering */
     let mut sample_buf = all_clips
@@ -150,9 +94,6 @@ fn main() {
         'outer: loop {
             if let Ok(msg) = rx_playback.try_recv() {
                 loop {
-                    // if audio_p_on_worker.load(std::sync::atomic::Ordering::Relaxed) {
-                    //     break;
-                    // }
                     if producer.occupied_len() > b_config.threshold {
                         tx_control_worker
                             .send(ProcessingControlMessage::BufferFull)
