@@ -61,8 +61,8 @@ impl AudioPlayer {
             PlayerCommand::Play => self.is_paused.store(false, Ordering::Relaxed),
             PlayerCommand::Pause => self.is_paused.store(true, Ordering::Relaxed),
             PlayerCommand::TogglePlayPause => {
-                let was_paused = self.is_paused.load(Ordering::Relaxed);
-                self.is_paused.store(!was_paused, Ordering::Relaxed);
+                let was_paused = self.is_paused.load(Ordering::Acquire);
+                self.is_paused.store(!was_paused, Ordering::Release);
             }
         }
     }
