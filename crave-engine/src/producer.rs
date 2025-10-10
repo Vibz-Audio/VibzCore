@@ -5,9 +5,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::thread;
-use symphonia::core::audio::SampleBuffer;
 use symphonia::core::errors::Error;
 
+use crate::decoder::Decoder;
 use crate::{
     audio_config::AudioBufferConfig,
     clip::AudioClip,
@@ -16,26 +16,28 @@ use crate::{
 
 type RingBufferProducer = ringbuf::CachingProd<Arc<SharedRb<Heap<f32>>>>;
 
-pub struct AudioProducer {
-    clips: Vec<AudioClip>,
+pub struct AudioProducer<T>
+where
+    T: Decoder,
+{
+    clips: Vec<AudioClip<T>>,
     producer: RingBufferProducer,
     config: AudioBufferConfig,
-    sample_buffers: Vec<Option<SampleBuffer<f32>>>,
 }
 
-impl AudioProducer {
+impl<T> AudioProducer<T>
+where
+    T: Decoder + Send + 'static,
+{
     pub fn new(
-        clips: Vec<AudioClip>,
+        clips: Vec<AudioClip<T>>,
         producer: RingBufferProducer,
         config: AudioBufferConfig,
     ) -> Self {
-        let sample_buffers = clips.iter().map(|_| None).collect();
-
         Self {
             clips,
             producer,
             config,
-            sample_buffers,
         }
     }
 
@@ -85,53 +87,27 @@ impl AudioProducer {
 
     fn decode_and_mix(&mut self) -> Result<Vec<f32>, Error> {
         let mut mixed_samples: Vec<f32> = Vec::new();
-        let mut any_decoded = false;
 
         // Decode from all clips and mix them together
         for (idx, clip) in self.clips.iter_mut().enumerate() {
-            match clip.decode() {
-                Ok(decoded) => {
-                    any_decoded = true;
-                    if self.sample_buffers[idx].is_none() {
-                        let spec = *decoded.spec();
-                        let duration = decoded.capacity() as u64;
-                        self.sample_buffers[idx] = Some(SampleBuffer::<f32>::new(duration, spec));
-                    }
+            let samples = clip.decode().unwrap();
 
-                    if let Some(buf) = &mut self.sample_buffers[idx] {
-                        buf.copy_interleaved_ref(decoded);
-                        let samples = buf.samples();
-
-                        // Initialize or mix samples
-                        if mixed_samples.is_empty() {
-                            mixed_samples = samples.to_vec();
-                        } else {
-                            // Mixing multiple clips
-                            for (i, &sample) in samples.iter().enumerate() {
-                                if i < mixed_samples.len() {
-                                    mixed_samples[i] += sample / 2.0;
-                                } else {
-                                    // In case clips are of different lengths
-                                    mixed_samples.push(sample);
-                                }
-                            }
-                        }
+            // Initialize or mix samples
+            if mixed_samples.is_empty() {
+                mixed_samples = samples
+            } else {
+                // Mixing multiple clips
+                for (i, &sample) in samples.iter().enumerate() {
+                    if i < mixed_samples.len() {
+                        mixed_samples[i] += sample / 2.0;
+                    } else {
+                        // In case clips are of different lengths
+                        mixed_samples.push(sample);
                     }
-                }
-                Err(Error::ResetRequired) => {
-                    println!("Decoder reset required for a clip");
-                    return Err(Error::ResetRequired);
-                }
-                Err(_) => {
-                    // This clip is done, continue with other clips
                 }
             }
         }
 
-        if any_decoded {
-            Ok(mixed_samples)
-        } else {
-            Ok(Vec::new()) // All clips are done
-        }
+        Ok(mixed_samples)
     }
 }

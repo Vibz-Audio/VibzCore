@@ -1,6 +1,7 @@
 #![allow(unused_variables)]
 mod audio_config;
 mod clip;
+mod decoder;
 mod messages;
 mod playback;
 mod producer;
@@ -15,6 +16,7 @@ use std::thread;
 use std::time::Duration;
 
 use crate::messages::{AudioOutput, PlayerCommand, ProducerCommand, ProducerStatus};
+use crate::wav_decoder::WaveDecoder;
 
 fn main() {
     let audio_config = audio_config::AudioBufferConfig::default();
@@ -38,7 +40,7 @@ fn main() {
         "samples/crave.wav",
     ];
 
-    let clips: Vec<clip::AudioClip> = clip_paths
+    let clips: Vec<clip::AudioClip<WaveDecoder>> = clip_paths
         .iter()
         .map(|path| {
             clip::AudioClip::new(Path::new(path), Some(Duration::from_millis(30_000)), None)

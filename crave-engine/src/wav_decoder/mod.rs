@@ -1,5 +1,5 @@
 use std::time::Duration;
-use symphonia::core::audio::AudioBufferRef;
+use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::{CODEC_TYPE_NULL, DecoderOptions};
 use symphonia::core::errors::Error;
 use symphonia::core::formats::{FormatOptions, SeekMode, SeekTo, Track};
@@ -7,6 +7,8 @@ use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 use symphonia::core::units::Time;
+
+use crate::decoder::{Decoder, DecoderError};
 
 pub struct WaveDecoder {
     reader: WaveReader,
@@ -60,8 +62,21 @@ impl WaveDecoder {
 
         Ok(WaveDecoder { reader })
     }
+}
 
-    pub fn set_st_time(&mut self, start_t: Duration) -> Result<(), Error> {
+impl Decoder for WaveDecoder {
+    //TODO: Fix errors
+    fn decode(&mut self) -> Result<Vec<f32>, DecoderError> {
+        let packet = self.reader.format.next_packet().unwrap();
+        let packet = self.reader.decoder.decode(&packet).unwrap();
+        let mut buffer = SampleBuffer::new(packet.capacity() as u64, *packet.spec());
+
+        buffer.copy_interleaved_ref(packet);
+
+        Ok(buffer.samples().to_vec())
+    }
+
+    fn seek(&mut self, start_t: Duration) -> Result<(), DecoderError> {
         let track = &self.reader.track;
 
         self.reader
@@ -76,10 +91,5 @@ impl WaveDecoder {
             .expect("Failed to seek");
 
         Ok(())
-    }
-
-    pub fn decode(&mut self) -> Result<AudioBufferRef, Error> {
-        let packet = self.reader.format.next_packet()?;
-        self.reader.decoder.decode(&packet)
     }
 }
