@@ -42,4 +42,8 @@ where
     pub fn decode(&mut self) -> Result<Vec<f32>, DecoderError> {
         self.decoder.decode()
     }
+
+    pub fn seek(&mut self, to: Duration) -> Result<(), DecoderError> {
+        self.decoder.seek(to)
+    }
 }

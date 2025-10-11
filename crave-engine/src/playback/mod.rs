@@ -1,6 +1,6 @@
 use cpal::SampleRate;
 use cpal::traits::{DeviceTrait, HostTrait};
-use crossbeam::channel::{Receiver, Sender as CbSender, unbounded};
+use crossbeam::channel::{Sender as CbSender, unbounded};
 use ringbuf::SharedRb;
 use ringbuf::storage::Heap;
 use ringbuf::traits::{Consumer, Observer};
@@ -10,8 +10,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::{
     audio_config,
-    messages::{AudioOutput, PlayerCommand, ProducerCommand},
-    visualizer::AudioVisualizer,
+    messages::{PlayerCommand, ProducerCommand},
 };
 
 const SILENCE_SAMPLE: f32 = 0.0;
@@ -22,11 +21,7 @@ pub struct AudioPlayer {
     consumer: Arc<Mutex<RingBuffer>>,
     data_request_tx: Sender<ProducerCommand>,
     config: audio_config::AudioBufferConfig,
-    audio_player_cmd_rx: Receiver<PlayerCommand>,
     is_paused: Arc<AtomicBool>,
-    visualizer: Option<Arc<AudioVisualizer>>,
-    /** Channel to send audio output, this can be viewed as a plugin interface */
-    output_tx: Option<crossbeam::channel::Sender<AudioOutput>>,
 }
 
 impl AudioPlayer {
@@ -40,20 +35,9 @@ impl AudioPlayer {
             consumer: Arc::new(Mutex::new(consumer)),
             data_request_tx,
             config,
-            audio_player_cmd_rx: command_rx,
             is_paused: Arc::new(AtomicBool::new(false)), // Start playing
-            visualizer: None,
-            output_tx: None,
         };
         (player, command_tx)
-    }
-
-    pub fn set_visualizer(&mut self, visualizer: Arc<AudioVisualizer>) {
-        self.visualizer = Some(visualizer);
-    }
-
-    pub fn set_output_channel(&mut self, output_tx: crossbeam::channel::Sender<AudioOutput>) {
-        self.output_tx = Some(output_tx);
     }
 
     pub fn dispatch(&self, command: PlayerCommand) {
@@ -64,12 +48,6 @@ impl AudioPlayer {
                 let was_paused = self.is_paused.load(Ordering::Acquire);
                 self.is_paused.store(!was_paused, Ordering::Release);
             }
-        }
-    }
-
-    pub fn process_commands(&self) {
-        while let Ok(command) = self.audio_player_cmd_rx.try_recv() {
-            self.dispatch(command);
         }
     }
 
@@ -85,8 +63,6 @@ impl AudioPlayer {
         let data_request_tx = self.data_request_tx.clone();
         let tolerance = self.config.tolerance;
         let is_paused = self.is_paused.clone();
-        let visualizer = self.visualizer.clone();
-        let output_tx = self.output_tx.clone();
         let sample_rate = self.config.sample_rate;
 
         device
@@ -113,26 +89,11 @@ impl AudioPlayer {
                             let _ = consumer.try_pop().unwrap_or(SILENCE_SAMPLE); // Skip left channel or first sample
                             *sample = consumer.try_pop().unwrap_or(SILENCE_SAMPLE); // Get right channel or actual sample
 
-                            // Send sample to visualizer if available
-                            if let Some(ref viz) = visualizer {
-                                viz.add_sample(*sample);
-                            }
-
                             output_samples.push(*sample);
                         } else {
                             *sample = SILENCE_SAMPLE;
                             output_samples.push(SILENCE_SAMPLE);
                         }
-                    }
-
-                    // Send audio output to channel if available
-                    if let Some(ref tx) = output_tx {
-                        let audio_output = AudioOutput {
-                            samples: output_samples,
-                            sample_rate,
-                            timestamp: std::time::Instant::now(),
-                        };
-                        let _ = tx.try_send(audio_output);
                     }
                 },
                 |err| eprintln!("Audio stream error: {:?}", err),

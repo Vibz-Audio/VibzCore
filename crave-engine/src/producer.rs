@@ -2,7 +2,6 @@ use ringbuf::SharedRb;
 use ringbuf::storage::Heap;
 use ringbuf::traits::{Observer, Producer};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::thread;
 use symphonia::core::errors::Error;
@@ -45,7 +44,6 @@ where
         mut self,
         rx_playback: Receiver<ProducerCommand>,
         tx_control: Sender<ProducerStatus>,
-        audio_done: Arc<AtomicBool>,
     ) {
         thread::spawn(move || {
             'outer: loop {
@@ -65,7 +63,6 @@ where
                                     // All clips are done
                                     tx_control.send(ProducerStatus::DecodingDone).ok();
                                     if self.producer.is_empty() {
-                                        audio_done.store(true, Ordering::Relaxed);
                                         break 'outer;
                                     }
                                 }
@@ -73,7 +70,6 @@ where
                             Err(_) => {
                                 // Error occurred, signal completion
                                 tx_control.send(ProducerStatus::DecodingDone).ok();
-                                audio_done.store(true, Ordering::Relaxed);
                                 break 'outer;
                             }
                         }
